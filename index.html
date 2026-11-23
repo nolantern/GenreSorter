@@ -3,13 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Spotify Genre Sorter</title>
+  <title>Spotify Genre Sorter (AI Edition)</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #121212; color: #eee; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; background: #121212; color: #eee; }
     h1 { color: #1DB954; margin-bottom: 0.25rem; }
     .sub { color: #999; font-size: 0.9rem; margin-bottom: 1.5rem; }
     .card { background: #1e1e1e; padding: 1.25rem; border-radius: 10px; margin-bottom: 1rem; }
-    select, input, button { padding: 0.55rem 0.85rem; border-radius: 6px; border: 1px solid #333; background: #2a2a2a; color: #fff; font-size: 0.95rem; }
+    select, input, textarea, button { padding: 0.55rem 0.85rem; border-radius: 6px; border: 1px solid #333; background: #2a2a2a; color: #fff; font-size: 0.95rem; }
+    textarea { width: 100%; box-sizing: border-box; font-family: monospace; font-size: 0.85rem; }
     button { background: #1DB954; color: #000; font-weight: 600; border: none; cursor: pointer; }
     button.secondary { background: #333; color: #fff; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -18,12 +19,14 @@
     .chip.active { background: #1DB954; color: #000; border-color: #1DB954; font-weight: 600; }
     .track-list { max-height: 240px; overflow-y: auto; font-size: 0.88rem; border-top: 1px solid #333; margin-top: 0.75rem; padding-top: 0.5rem; line-height: 1.5; }
     .row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: center; margin-top: 0.6rem; }
+    label.block { display: block; font-size: 0.85rem; color: #bbb; margin-top: 0.75rem; margin-bottom: 0.25rem; }
     code { background: #2a2a2a; padding: 0.15rem 0.35rem; border-radius: 4px; }
+    details summary { cursor: pointer; color: #1DB954; font-weight: 600; }
   </style>
 </head>
 <body>
   <h1>Spotify Genre Sorter</h1>
-  <div class="sub">Pure JS + MusicBrainz Batch-Scan + Lieblingssongs. Redirect-URI: <code id="redirectHint"></code></div>
+  <div class="sub">Mit KI-Clustering, Lieblingssongs &amp; groben Kategorien. Redirect-URI: <code id="redirectHint"></code></div>
 
   <div id="loginBox" class="card" style="display:none;">
     <strong>Mit Spotify verbinden</strong>
@@ -31,26 +34,67 @@
       <input id="clientIdInput" placeholder="Spotify Client ID einfügen" style="min-width:300px;" />
       <button onclick="startLogin()">Mit Spotify einloggen</button>
     </div>
-    <p style="color:#aaa; font-size:0.85rem; margin-bottom:0;">
-      Trage die oben angezeigte Redirect-URI exakt so im Spotify Developer Dashboard ein.
-    </p>
   </div>
 
   <div id="appBox" style="display:none;">
     <div class="card">
       <div class="row" style="justify-content: space-between; margin-top: 0;">
-        <strong>1. Quell-Playlist wählen</strong>
+        <strong>1. Quelle &amp; KI-Methode wählen</strong>
         <button class="secondary" onclick="logout()">Logout</button>
       </div>
+
       <div class="row">
         <select id="sourcePlaylist"></select>
-        <button id="scanBtn" onclick="scanPlaylist()">Genres scannen</button>
+        <select id="scanMode" onchange="onScanModeChange()">
+          <option value="gemini">KI-API: Google Gemini (Free Key)</option>
+          <option value="groq">KI-API: Groq (Free Key)</option>
+          <option value="openrouter">KI-API: OpenRouter (Free Key)</option>
+          <option value="musicbrainz">Ohne KI-Key: MusicBrainz (grob gebündelt)</option>
+        </select>
+      </div>
+
+      <div id="aiConfigBox">
+        <div class="row">
+          <input id="aiApiKey" type="password" placeholder="Kostenloser API-Key (bleibt lokal im Browser)" style="min-width:310px;" />
+          <input id="aiModel" placeholder="Modell-ID" style="min-width:210px;" />
+          <button class="secondary" onclick="clearAiCache()" title="Falls du die Kategorien geändert hast">KI-Cache leeren</button>
+        </div>
+      </div>
+
+      <label class="block" for="categoriesInput">Ziel-Kategorien (kommagetrennt – die KI ordnet jeden Song hier ein):</label>
+      <input id="categoriesInput" style="width:100%; box-sizing:border-box;"
+        value="Hardstyle & Hard Dance, Techno & House, EDM & Dance, Pop, Hip-Hop & Rap, Rock & Metal, Schlager & Party, R&B & Soul, Indie & Alternative, Unbekannt" />
+
+      <div class="row" style="margin-top:0.85rem;">
+        <button id="scanBtn" onclick="scanPlaylist()">Songs laden &amp; klassifizieren</button>
       </div>
       <p id="scanStatus" style="color:#aaa; font-size:0.9rem; margin-bottom:0;"></p>
     </div>
 
+    <!-- Option B: Ganz ohne API-Key über ChatGPT / Gemini Web -->
+    <div id="manualBridgeBox" class="card" style="display:none;">
+      <details>
+        <summary>Ohne API-Key? „Unbekannt“-Songs (oder alle) über ChatGPT / Gemini-Chat klassifizieren</summary>
+        <p style="font-size:0.88rem; color:#bbb;">
+          Kopiert jeweils 250 Songs als fertigen Prompt. In ChatGPT/Gemini einfügen und das JSON-Ergebnis unten zurückkopieren:
+        </p>
+        <div class="row">
+          <select id="exportScope">
+            <option value="unknown">Nur „Unbekannt“-Songs exportieren</option>
+            <option value="all">Alle Songs exportieren</option>
+          </select>
+          <button class="secondary" onclick="copyNextChatPrompt()">Nächsten Block kopieren</button>
+          <span id="exportProgress" style="font-size:0.85rem; color:#aaa;"></span>
+        </div>
+        <textarea id="importJsonArea" rows="4" placeholder='Hier die JSON-Antwort aus dem KI-Chat einfügen, z.B. {"0": "Hardstyle & Hard Dance", ...}' style="margin-top:0.6rem;"></textarea>
+        <div class="row">
+          <button class="secondary" onclick="applyImportedJson()">JSON übernehmen</button>
+        </div>
+      </details>
+    </div>
+
     <div id="genreBox" class="card" style="display:none;">
-      <strong>2. Genres auswählen (Mehrfachauswahl)</strong>
+      <strong>2. Kategorien auswählen (Mehrfachauswahl)</strong>
       <div id="genreChips" class="genres"></div>
       <div id="preview" class="track-list"></div>
     </div>
@@ -85,15 +129,36 @@
       'user-library-modify'
     ].join(' ');
 
+    const DEFAULT_MODELS = {
+      gemini: 'gemini-3.8-flash',
+      groq: 'llama-3.3-70b-versatile',
+      openrouter: 'openrouter/free'
+    };
+
+    // Grobes Keyword-Mapping für den MusicBrainz-Fallback
+    const MB_CLUSTER_RULES = [
+      { cat: 'Hardstyle & Hard Dance', re: /hardstyle|rawstyle|hard dance|hardcore|gabber|frenchcore|uptempo|happy hardcore|jumpstyle|hard trance|hard techno|schranz/i },
+      { cat: 'Techno & House', re: /techno|house|tech house|deep house|minimal|trance|psytrance|acid|progressive/i },
+      { cat: 'EDM & Dance', re: /edm|electronic|electro|dance|dubstep|drum and bass|dnb|future bass|synth|club/i },
+      { cat: 'Hip-Hop & Rap', re: /hip hop|hip-hop|rap|trap|drill|deutschrap|boom bap|grime/i },
+      { cat: 'Rock & Metal', re: /rock|metal|punk|grunge|hardcore punk|emo|nu metal|metalcore/i },
+      { cat: 'Pop', re: /\bpop\b|synthpop|electropop|dance-pop|k-pop|europop|teen pop/i },
+      { cat: 'Schlager & Party', re: /schlager|volksmusik|party|mallorca|apres/i },
+      { cat: 'R&B & Soul', re: /r&b|rnb|soul|funk|neo soul/i },
+      { cat: 'Indie & Alternative', re: /indie|alternative|folk|singer-songwriter|shoegaze|post-punk/i }
+    ];
+
     const REDIRECT_URI = window.location.origin + window.location.pathname;
     const IGNORED_TAGS = new Set(['seen live', 'favorites', 'favourite', 'albums i own', 'spotify', 'under 2000 listeners']);
 
     let allTracks = [];
     let selectedGenres = new Set();
+    let exportQueue = [];
+    let exportOffset = 0;
 
     document.getElementById('redirectHint').textContent = REDIRECT_URI;
 
-    // === PKCE HELPER ===
+    // === PKCE & AUTH ===
     function generateRandomString(length) {
       const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
       const bytes = crypto.getRandomValues(new Uint8Array(length));
@@ -109,7 +174,6 @@
 
     const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-    // === OAUTH FLOW ===
     async function startLogin() {
       const clientId = document.getElementById('clientIdInput').value.trim();
       if (!clientId) return alert('Bitte zuerst deine Spotify Client ID eingeben.');
@@ -118,18 +182,12 @@
       const verifier = generateRandomString(64);
       const challenge = await sha256Base64Url(verifier);
       const state = generateRandomString(16);
-
       sessionStorage.setItem('pkce_verifier', verifier);
       sessionStorage.setItem('pkce_state', state);
 
       const params = new URLSearchParams({
-        response_type: 'code',
-        client_id: clientId,
-        scope: SCOPES,
-        redirect_uri: REDIRECT_URI,
-        state,
-        code_challenge_method: 'S256',
-        code_challenge: challenge
+        response_type: 'code', client_id: clientId, scope: SCOPES,
+        redirect_uri: REDIRECT_URI, state, code_challenge_method: 'S256', code_challenge: challenge
       });
       window.location.href = `https://accounts.spotify.com/authorize?${params}`;
     }
@@ -139,40 +197,24 @@
       const code = urlParams.get('code');
       const state = urlParams.get('state');
       const error = urlParams.get('error');
-
-      if (error) {
-        alert('Spotify Login abgebrochen: ' + error);
-        window.history.replaceState({}, '', window.location.pathname);
-        return;
-      }
+      if (error) { alert('Spotify Login abgebrochen: ' + error); window.history.replaceState({}, '', window.location.pathname); return; }
       if (!code) return;
 
       const expectedState = sessionStorage.getItem('pkce_state');
       const verifier = sessionStorage.getItem('pkce_verifier');
       const clientId = localStorage.getItem('sp_client_id');
-
-      if (!verifier || state !== expectedState) {
-        alert('Ungültiger OAuth-State.');
-        return;
-      }
+      if (!verifier || state !== expectedState) return alert('Ungültiger OAuth-State.');
 
       const resp = await fetch('https://accounts.spotify.com/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          client_id: clientId,
-          grant_type: 'authorization_code',
-          code,
-          redirect_uri: REDIRECT_URI,
-          code_verifier: verifier
+          client_id: clientId, grant_type: 'authorization_code', code,
+          redirect_uri: REDIRECT_URI, code_verifier: verifier
         })
       });
-
       window.history.replaceState({}, '', window.location.pathname);
-      if (!resp.ok) {
-        alert('Token-Tausch fehlgeschlagen: ' + await resp.text());
-        return;
-      }
+      if (!resp.ok) return alert('Token-Tausch fehlgeschlagen: ' + await resp.text());
       saveTokens(await resp.json());
     }
 
@@ -186,15 +228,10 @@
       const refreshToken = localStorage.getItem('sp_refresh_token');
       const clientId = localStorage.getItem('sp_client_id');
       if (!refreshToken || !clientId) return false;
-
       const resp = await fetch('https://accounts.spotify.com/api/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: refreshToken,
-          client_id: clientId
-        })
+        body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId })
       });
       if (!resp.ok) return false;
       saveTokens(await resp.json());
@@ -209,49 +246,57 @@
     }
 
     async function spotifyFetch(url, options = {}) {
-      if (Date.now() > Number(localStorage.getItem('sp_expires_at') || 0)) {
-        await refreshAccessToken();
-      }
+      if (Date.now() > Number(localStorage.getItem('sp_expires_at') || 0)) await refreshAccessToken();
       const doFetch = () => fetch(url, {
         ...options,
-        headers: {
-          'Authorization': `Bearer ${localStorage.getItem('sp_access_token')}`,
-          ...(options.headers || {})
-        }
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('sp_access_token')}`, ...(options.headers || {}) }
       });
-
       let resp = await doFetch();
-      if (resp.status === 401 && await refreshAccessToken()) {
-        resp = await doFetch();
-      }
-      if (resp.status === 401) {
-        logout();
-        throw new Error('Sitzung abgelaufen.');
-      }
+      if (resp.status === 401 && await refreshAccessToken()) resp = await doFetch();
+      if (resp.status === 401) { logout(); throw new Error('Sitzung abgelaufen.'); }
       return resp;
     }
 
-    // === PLAYLISTS LADEN ===
-    async function loadPlaylists() {
-      const meResp = await spotifyFetch('https://api.spotify.com/v1/me');
-      const me = await meResp.json();
+    // === UI CONFIG ===
+    function onScanModeChange() {
+      const mode = document.getElementById('scanMode').value;
+      localStorage.setItem('sorter_scan_mode', mode);
+      const isAi = mode !== 'musicbrainz';
+      document.getElementById('aiConfigBox').style.display = isAi ? 'block' : 'none';
+      if (isAi) {
+        document.getElementById('aiApiKey').value = localStorage.getItem(`ai_key_${mode}`) || '';
+        document.getElementById('aiModel').value = localStorage.getItem(`ai_model_${mode}`) || DEFAULT_MODELS[mode];
+      }
+    }
 
+    function saveAiSettings() {
+      const mode = document.getElementById('scanMode').value;
+      if (mode !== 'musicbrainz') {
+        localStorage.setItem(`ai_key_${mode}`, document.getElementById('aiApiKey').value.trim());
+        localStorage.setItem(`ai_model_${mode}`, document.getElementById('aiModel').value.trim());
+      }
+      localStorage.setItem('sorter_categories', document.getElementById('categoriesInput').value);
+    }
+
+    function clearAiCache() {
+      localStorage.removeItem('ai_genre_cache');
+      alert('KI-Cache geleert.');
+    }
+
+    async function loadPlaylists() {
+      const me = await (await spotifyFetch('https://api.spotify.com/v1/me')).json();
       const src = document.getElementById('sourcePlaylist');
       const tgt = document.getElementById('targetPlaylist');
       src.innerHTML = '';
       tgt.innerHTML = '';
-
-      // Lieblingssongs als erste Option hinzufügen
       src.add(new Option('❤️ Lieblingssongs (Gespeicherte Songs)', LIKED_ID));
       tgt.add(new Option('❤️ Lieblingssongs (Gespeicherte Songs)', LIKED_ID));
 
       let url = 'https://api.spotify.com/v1/me/playlists?limit=50';
       while (url) {
-        const resp = await spotifyFetch(url);
-        const data = await resp.json();
+        const data = await (await spotifyFetch(url)).json();
         for (const pl of data.items || []) {
-          const readable = (pl.owner?.id === me.id) || pl.collaborative;
-          if (readable) {
+          if ((pl.owner?.id === me.id) || pl.collaborative) {
             src.add(new Option(`${pl.name} (${pl.owner?.display_name || ''})`, pl.id));
             tgt.add(new Option(pl.name, pl.id));
           }
@@ -260,149 +305,223 @@
       }
     }
 
-    // === GENRE CACHE & MUSICBRAINZ BATCH-SCAN ===
-    function loadGenreCache() {
-      try { return JSON.parse(localStorage.getItem('mb_genre_cache') || '{}'); }
-      catch { return {}; }
+    // === KI BATCH-KLASSIFIKATION ===
+    function extractJsonObject(text) {
+      const cleaned = text.replace(/```json|```/gi, '').trim();
+      const start = cleaned.indexOf('{');
+      const end = cleaned.lastIndexOf('}');
+      if (start === -1 || end === -1) throw new Error('KI hat kein gültiges JSON geliefert.');
+      const parsed = JSON.parse(cleaned.slice(start, end + 1));
+      return parsed.results || parsed;
     }
 
-    function saveGenreCache(cache) {
-      localStorage.setItem('mb_genre_cache', JSON.stringify(cache));
+    function matchCategory(rawCat, validCategories) {
+      const val = String(rawCat || '').trim().toLowerCase();
+      const exact = validCategories.find(c => c.toLowerCase() === val);
+      if (exact) return exact;
+      const partial = validCategories.find(c => val.includes(c.toLowerCase()) || c.toLowerCase().includes(val));
+      return partial || 'Unbekannt';
     }
 
-    function extractTopTags(tags) {
-      return (tags || [])
-        .filter(t => (t.count || 0) >= 1 && !IGNORED_TAGS.has(t.name.toLowerCase()))
-        .sort((a, b) => (b.count || 0) - (a.count || 0))
-        .slice(0, 4)
-        .map(t => t.name.toLowerCase());
-    }
+    async function callAiProvider(provider, apiKey, model, prompt) {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        let resp;
+        if (provider === 'gemini') {
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+          resp = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: prompt }] }],
+              generationConfig: { temperature: 0.1, responseMimeType: 'application/json' }
+            })
+          });
+        } else {
+          const endpoint = provider === 'groq'
+            ? 'https://api.groq.com/openai/v1/chat/completions'
+            : 'https://openrouter.ai/api/v1/chat/completions';
+          const body = {
+            model,
+            temperature: 0.1,
+            messages: [{ role: 'user', content: prompt }]
+          };
+          if (provider === 'groq') body.response_format = { type: 'json_object' };
+          resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+            body: JSON.stringify(body)
+          });
+        }
 
-    async function queryMusicBrainzBatch(artistNames) {
-      const query = artistNames
-        .map(name => `artist:"${name.replace(/["\\]/g, ' ').trim()}"`)
-        .join(' OR ');
+        if (resp.status === 429 || resp.status === 503) {
+          await sleep(6000 * (attempt + 1));
+          continue;
+        }
+        if (!resp.ok) {
+          throw new Error(`KI-API Fehler (${resp.status}): ${await resp.text()}`);
+        }
 
-      const url = `https://musicbrainz.org/ws/2/artist/?query=${encodeURIComponent(query)}&fmt=json&limit=100`;
-      const resp = await fetch(url);
-      if (resp.status === 503 || resp.status === 429) {
-        await sleep(2500);
-        return { matched: {}, truncated: false };
+        const data = await resp.json();
+        if (provider === 'gemini') {
+          const parts = data.candidates?.[0]?.content?.parts || [];
+          return parts.filter(p => !p.thought && p.text).map(p => p.text).join('');
+        }
+        return data.choices?.[0]?.message?.content || '';
       }
-      if (!resp.ok) return { matched: {}, truncated: false };
+      throw new Error('KI-Rate-Limit mehrfach überschritten. Bitte kurz warten und erneut starten (Fortschritt ist gecacht).');
+    }
 
-      const data = await resp.json();
-      const wanted = new Set(artistNames.map(n => n.trim().toLowerCase()));
-      const bestByKey = {};
+    function buildClassificationPrompt(batchTracks, categories) {
+      const lines = batchTracks.map((t, idx) => `${idx}: ${t.artists.join(', ')} - ${t.name}`).join('\n');
+      return `Du bist ein Musikexperte. Ordne jedem Song genau EINE passende Kategorie aus dieser Liste zu:
+[${categories.join(', ')}]
 
-      for (const artistObj of data.artists || []) {
-        const key = (artistObj.name || '').trim().toLowerCase();
-        if (!wanted.has(key)) continue;
+Wichtige Regeln:
+- Hardstyle, Rawstyle, Hard Dance, Uptempo, Frenchcore, Happy Hardcore und Hard Techno gehören zusammen in die passende Hard-Kategorie (falls in der Liste vorhanden, z.B. "Hardstyle & Hard Dance").
+- Schätze auch bei weniger bekannten DJs/Producern anhand von Artist-Namen, Remix-Zusätzen oder Titeln so gut wie möglich.
+- Nutze "Unbekannt" nur, wenn wirklich gar keine Einordnung möglich ist.
+- Antworte AUSSCHLIESSLICH mit einem JSON-Objekt im Format {"0": "Kategorie", "1": "Kategorie", ...}.
 
-        const tags = extractTopTags(artistObj.tags);
-        const tagScore = (artistObj.tags || []).reduce((sum, t) => sum + (t.count || 0), 0);
+Songs:
+${lines}`;
+    }
 
-        if (!bestByKey[key] || tagScore > bestByKey[key].tagScore) {
-          bestByKey[key] = { tags, tagScore };
+    async function classifyWithAI(tracks, categories, provider, apiKey, model, statusEl) {
+      const catSig = categories.join('|');
+      let cache = {};
+      try { cache = JSON.parse(localStorage.getItem('ai_genre_cache') || '{}'); } catch {}
+
+      const uncached = [];
+      for (const t of tracks) {
+        const cKey = `${t.uri}::${catSig}`;
+        if (cKey in cache) {
+          t.genreList = [cache[cKey]];
+        } else {
+          uncached.push(t);
         }
       }
 
-      const matched = {};
-      for (const [key, val] of Object.entries(bestByKey)) {
-        matched[key] = val.tags;
+      const BATCH_SIZE = 40;
+      for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
+        const batch = uncached.slice(i, i + BATCH_SIZE);
+        statusEl.textContent = `KI klassifiziert Songs (${Math.min(i + BATCH_SIZE, uncached.length)}/${uncached.length} neu)...`;
+
+        const prompt = buildClassificationPrompt(batch, categories);
+        const rawText = await callAiProvider(provider, apiKey, model, prompt);
+        const mapping = extractJsonObject(rawText);
+
+        batch.forEach((t, idx) => {
+          const cat = matchCategory(mapping[String(idx)], categories);
+          t.genreList = [cat];
+          cache[`${t.uri}::${catSig}`] = cat;
+        });
+
+        localStorage.setItem('ai_genre_cache', JSON.stringify(cache));
+        if (i + BATCH_SIZE < uncached.length) await sleep(1500);
       }
-      return { matched, truncated: (data.count || 0) > 100 };
     }
 
+    // === MUSICBRAINZ FALLBACK (GROB GEBÜNDELT) ===
+    async function classifyWithMusicBrainz(tracks, statusEl) {
+      const uniqueArtists = Array.from(new Set(tracks.flatMap(t => t.artists)));
+      let cache = {};
+      try { cache = JSON.parse(localStorage.getItem('mb_genre_cache') || '{}'); } catch {}
+
+      const uncached = uniqueArtists.filter(name => !(name.trim().toLowerCase() in cache));
+      const BATCH_SIZE = 8;
+
+      for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
+        const batch = uncached.slice(i, i + BATCH_SIZE);
+        statusEl.textContent = `MusicBrainz-Scan (${Math.min(i + BATCH_SIZE, uncached.length)}/${uncached.length} neue Artists)...`;
+        await sleep(1050);
+
+        const q = batch.map(n => `artist:"${n.replace(/["\\]/g, ' ').trim()}"`).join(' OR ');
+        try {
+          const resp = await fetch(`https://musicbrainz.org/ws/2/artist/?query=${encodeURIComponent(q)}&fmt=json&limit=100`);
+          if (resp.ok) {
+            const data = await resp.json();
+            const wanted = new Set(batch.map(n => n.trim().toLowerCase()));
+            const best = {};
+            for (const a of data.artists || []) {
+              const k = (a.name || '').trim().toLowerCase();
+              if (!wanted.has(k)) continue;
+              const tags = (a.tags || []).filter(t => (t.count || 0) >= 1 && !IGNORED_TAGS.has(t.name.toLowerCase()))
+                .sort((x, y) => (y.count || 0) - (x.count || 0)).slice(0, 5).map(t => t.name.toLowerCase());
+              const score = (a.tags || []).reduce((s, t) => s + (t.count || 0), 0);
+              if (!best[k] || score > best[k].score) best[k] = { tags, score };
+            }
+            for (const n of batch) {
+              const k = n.trim().toLowerCase();
+              cache[k] = best[k]?.tags || [];
+            }
+          }
+        } catch {}
+        if ((i / BATCH_SIZE) % 5 === 0) localStorage.setItem('mb_genre_cache', JSON.stringify(cache));
+      }
+      localStorage.setItem('mb_genre_cache', JSON.stringify(cache));
+
+      for (const t of tracks) {
+        const rawTags = t.artists.flatMap(a => cache[a.trim().toLowerCase()] || []);
+        const joined = rawTags.join(' | ');
+        const matched = new Set();
+        for (const rule of MB_CLUSTER_RULES) {
+          if (rule.re.test(joined)) matched.add(rule.cat);
+        }
+        t.genreList = matched.size ? Array.from(matched) : ['Unbekannt'];
+      }
+    }
+
+    // === HAUPT-SCAN ===
     async function scanPlaylist() {
+      saveAiSettings();
       const playlistId = document.getElementById('sourcePlaylist').value;
       const isLiked = playlistId === LIKED_ID;
+      const mode = document.getElementById('scanMode').value;
+      const apiKey = document.getElementById('aiApiKey').value.trim();
+      const model = document.getElementById('aiModel').value.trim() || DEFAULT_MODELS[mode];
+      const categories = document.getElementById('categoriesInput').value.split(',').map(s => s.trim()).filter(Boolean);
+
+      if (mode !== 'musicbrainz' && !apiKey) {
+        return alert('Bitte einen kostenlosen API-Key eingeben (oder unten MusicBrainz wählen).');
+      }
+
       const btn = document.getElementById('scanBtn');
       const status = document.getElementById('scanStatus');
       btn.disabled = true;
 
       try {
         const tracks = [];
-        const uniqueArtists = new Set();
-
         let url = isLiked
           ? 'https://api.spotify.com/v1/me/tracks?limit=50'
           : `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50`;
 
         while (url) {
-          status.textContent = `Lade Songs (${tracks.length} bisher)...`;
+          status.textContent = `Lade Spotify-Songs (${tracks.length} bisher)...`;
           const resp = await spotifyFetch(url);
-          if (!resp.ok) {
-            throw new Error(isLiked
-              ? 'Kein Zugriff auf Lieblingssongs. Bitte einmal Logout + neu einloggen (Scope user-library-read).'
-              : 'Kein Zugriff auf diese Playlist (im Dev Mode nur eigene/kollaborative).');
-          }
+          if (!resp.ok) throw new Error('Kein Zugriff auf diese Liste (bei Lieblingssongs ggf. einmal Logout + Login).');
           const data = await resp.json();
 
           for (const entry of data.items || []) {
             if (entry.is_local) continue;
-            // /me/tracks nutzt weiterhin "track", Playlists nutzen seit 2026 "item"
             const item = isLiked ? entry.track : (entry.item || entry.track);
             if (!item || item.type !== 'track' || !item.uri) continue;
-
             const artists = (item.artists || []).map(a => a.name).filter(Boolean);
-            artists.forEach(a => uniqueArtists.add(a));
-
-            const spotifyGenres = (item.artists || []).flatMap(a => a.genres || []).map(g => g.toLowerCase());
-            tracks.push({ uri: item.uri, name: item.name, artists, genres: new Set(spotifyGenres) });
+            tracks.push({ uri: item.uri, name: item.name, artists, genreList: ['Unbekannt'] });
           }
           url = data.next;
         }
 
-        // Nur uncached Artists in 8er-Batches bei MusicBrainz abfragen
-        const cache = loadGenreCache();
-        const uncached = Array.from(uniqueArtists).filter(name => !(name.trim().toLowerCase() in cache));
-
-        const BATCH_SIZE = 8;
-        for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
-          const batch = uncached.slice(i, i + BATCH_SIZE);
-          status.textContent = `Scanne Genres (${Math.min(i + BATCH_SIZE, uncached.length)}/${uncached.length} neue Artists)...`;
-
-          await sleep(1050);
-          const { matched, truncated } = await queryMusicBrainzBatch(batch);
-
-          for (const name of batch) {
-            const key = name.trim().toLowerCase();
-            if (key in matched) {
-              cache[key] = matched[key];
-            } else if (truncated && batch.length > 1) {
-              // Nur falls >100 Treffer die Antwort abgeschnitten haben, einzeln nachprüfen
-              await sleep(1050);
-              const single = await queryMusicBrainzBatch([name]);
-              cache[key] = single.matched[key] || [];
-            } else {
-              cache[key] = [];
-            }
-          }
-          if ((i / BATCH_SIZE) % 5 === 0) saveGenreCache(cache);
-        }
-        saveGenreCache(cache);
-
-        // Genres den Songs zuordnen
-        const genreCounts = {};
-        for (const t of tracks) {
-          for (const a of t.artists) {
-            (cache[a.trim().toLowerCase()] || []).forEach(g => t.genres.add(g));
-          }
-          t.genreList = t.genres.size ? Array.from(t.genres) : ['unbekannt'];
-          for (const g of t.genreList) {
-            genreCounts[g] = (genreCounts[g] || 0) + 1;
-          }
+        if (mode === 'musicbrainz') {
+          await classifyWithMusicBrainz(tracks, status);
+        } else {
+          await classifyWithAI(tracks, categories, mode, apiKey, model, status);
         }
 
         allTracks = tracks;
-        selectedGenres.clear();
-        const sortedGenres = Object.entries(genreCounts)
-          .map(([genre, count]) => ({ genre, count }))
-          .sort((a, b) => b.count - a.count);
-
-        status.textContent = `Fertig: ${tracks.length} Songs, ${sortedGenres.length} Genres gefunden (${uncached.length} neue Artists abgefragt).`;
-        renderGenres(sortedGenres);
+        exportQueue = [];
+        exportOffset = 0;
+        document.getElementById('manualBridgeBox').style.display = 'block';
+        rebuildGenreUI(status);
       } catch (err) {
         status.textContent = err.message;
       } finally {
@@ -410,10 +529,17 @@
       }
     }
 
-    function renderGenres(genres) {
+    function rebuildGenreUI(statusEl) {
+      const counts = {};
+      for (const t of allTracks) {
+        for (const g of t.genreList) counts[g] = (counts[g] || 0) + 1;
+      }
+      const sorted = Object.entries(counts).map(([genre, count]) => ({ genre, count })).sort((a, b) => b.count - a.count);
+
+      selectedGenres.clear();
       const container = document.getElementById('genreChips');
       container.innerHTML = '';
-      genres.forEach(({ genre, count }) => {
+      sorted.forEach(({ genre, count }) => {
         const chip = document.createElement('div');
         chip.className = 'chip';
         chip.textContent = `${genre} (${count})`;
@@ -425,11 +551,60 @@
         };
         container.appendChild(chip);
       });
+
       document.getElementById('genreBox').style.display = 'block';
       document.getElementById('targetBox').style.display = 'block';
+      if (statusEl) {
+        const unk = counts['Unbekannt'] || 0;
+        statusEl.textContent = `Fertig: ${allTracks.length} Songs klassifiziert (davon ${unk} Unbekannt).`;
+      }
       updatePreview();
     }
 
+    // === CHAT COPY-PASTE BRIDGE (OHNE API KEY) ===
+    async function copyNextChatPrompt() {
+      const scope = document.getElementById('exportScope').value;
+      const categories = document.getElementById('categoriesInput').value.split(',').map(s => s.trim()).filter(Boolean);
+
+      if (!exportQueue.length || exportOffset >= exportQueue.length) {
+        exportQueue = allTracks
+          .map((t, idx) => ({ idx, t }))
+          .filter(x => scope === 'all' || x.t.genreList.includes('Unbekannt'));
+        exportOffset = 0;
+      }
+      if (!exportQueue.length) return alert('Keine passenden Songs zum Exportieren.');
+
+      const chunk = exportQueue.slice(exportOffset, exportOffset + 250);
+      exportOffset += chunk.length;
+
+      const lines = chunk.map(x => `${x.idx}: ${x.t.artists.join(', ')} - ${x.t.name}`).join('\n');
+      const prompt = `Ordne jedem Song genau eine Kategorie aus [${categories.join(', ')}] zu. Antworte NUR mit JSON im Format {"ID": "Kategorie"}:\n\n${lines}`;
+      await navigator.clipboard.writeText(prompt);
+      document.getElementById('exportProgress').textContent =
+        `Block kopiert (${exportOffset}/${exportQueue.length} Songs).`;
+    }
+
+    function applyImportedJson() {
+      const categories = document.getElementById('categoriesInput').value.split(',').map(s => s.trim()).filter(Boolean);
+      try {
+        const map = extractJsonObject(document.getElementById('importJsonArea').value);
+        let updated = 0;
+        for (const [k, v] of Object.entries(map)) {
+          const idx = Number(k);
+          if (!Number.isNaN(idx) && allTracks[idx]) {
+            allTracks[idx].genreList = [matchCategory(v, categories)];
+            updated++;
+          }
+        }
+        document.getElementById('importJsonArea').value = '';
+        rebuildGenreUI(document.getElementById('scanStatus'));
+        alert(`${updated} Songs aktualisiert!`);
+      } catch (e) {
+        alert('JSON konnte nicht gelesen werden: ' + e.message);
+      }
+    }
+
+    // === VORSCHAU & TRANSFER ===
     function getMatchingTracks() {
       return allTracks.filter(t => t.genreList.some(g => selectedGenres.has(g)));
     }
@@ -449,7 +624,7 @@
 
     async function executeTransfer() {
       const matches = getMatchingTracks();
-      if (!matches.length) return alert('Bitte mindestens ein Genre auswählen.');
+      if (!matches.length) return alert('Bitte mindestens eine Kategorie auswählen.');
 
       const btn = document.getElementById('transferBtn');
       const status = document.getElementById('transferStatus');
@@ -460,9 +635,7 @@
       btn.disabled = true;
       try {
         let targetId = isNew ? null : document.getElementById('targetPlaylist').value;
-        if (!isNew && targetId === sourceId) {
-          throw new Error('Quelle und Ziel dürfen nicht identisch sein.');
-        }
+        if (!isNew && targetId === sourceId) throw new Error('Quelle und Ziel dürfen nicht identisch sein.');
 
         if (isNew) {
           const name = document.getElementById('newPlaylistName').value.trim();
@@ -481,46 +654,37 @@
         status.textContent = `Füge ${uris.length} Songs hinzu...`;
 
         if (targetId === LIKED_ID) {
-          // 2026 Library-Endpunkt: max. 40 URIs pro Aufruf
           for (let i = 0; i < uris.length; i += 40) {
             const chunk = uris.slice(i, i + 40);
-            const resp = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, {
-              method: 'PUT'
-            });
-            if (!resp.ok) throw new Error('Fehler beim Speichern in Lieblingssongs.');
+            const r = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, { method: 'PUT' });
+            if (!r.ok) throw new Error('Fehler beim Speichern in Lieblingssongs.');
           }
         } else {
           for (let i = 0; i < uris.length; i += 100) {
             const chunk = uris.slice(i, i + 100);
-            const addResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${targetId}/items`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ uris: chunk })
+            const r = await spotifyFetch(`https://api.spotify.com/v1/playlists/${targetId}/items`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uris: chunk })
             });
-            if (!addResp.ok) throw new Error('Fehler beim Hinzufügen der Songs.');
+            if (!r.ok) throw new Error('Fehler beim Hinzufügen der Songs.');
           }
         }
 
         if (actionMode === 'move') {
           status.textContent = 'Entferne Songs aus der Quelle...';
           if (sourceId === LIKED_ID) {
-            // 2026 Library-Endpunkt: max. 40 URIs pro Aufruf
             for (let i = 0; i < uris.length; i += 40) {
               const chunk = uris.slice(i, i + 40);
-              const delResp = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, {
-                method: 'DELETE'
-              });
-              if (!delResp.ok) throw new Error('Songs kopiert, aber Entfernen aus Lieblingssongs fehlgeschlagen.');
+              const r = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, { method: 'DELETE' });
+              if (!r.ok) throw new Error('Songs kopiert, aber Entfernen aus Lieblingssongs fehlgeschlagen.');
             }
           } else {
             for (let i = 0; i < uris.length; i += 100) {
               const chunk = uris.slice(i, i + 100);
-              const delResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${sourceId}/items`, {
-                method: 'DELETE',
-                headers: { 'Content-Type': 'application/json' },
+              const r = await spotifyFetch(`https://api.spotify.com/v1/playlists/${sourceId}/items`, {
+                method: 'DELETE', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ items: chunk.map(uri => ({ uri })) })
               });
-              if (!delResp.ok) throw new Error('Songs kopiert, aber Entfernen aus Quelle fehlgeschlagen.');
+              if (!r.ok) throw new Error('Songs kopiert, aber Entfernen aus Quelle fehlgeschlagen.');
             }
           }
         }
@@ -538,9 +702,13 @@
     (async function init() {
       const savedId = localStorage.getItem('sp_client_id');
       if (savedId) document.getElementById('clientIdInput').value = savedId;
+      const savedMode = localStorage.getItem('sorter_scan_mode');
+      if (savedMode) document.getElementById('scanMode').value = savedMode;
+      const savedCats = localStorage.getItem('sorter_categories');
+      if (savedCats) document.getElementById('categoriesInput').value = savedCats;
+      onScanModeChange();
 
       await handleOAuthCallback();
-
       if (!localStorage.getItem('sp_access_token')) {
         document.getElementById('loginBox').style.display = 'block';
         return;
