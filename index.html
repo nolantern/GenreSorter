@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Spotify Genre Sorter (Pure JS)</title>
+  <title>Spotify Genre Sorter</title>
   <style>
     body { font-family: system-ui, sans-serif; max-width: 860px; margin: 2rem auto; padding: 0 1rem; background: #121212; color: #eee; }
     h1 { color: #1DB954; margin-bottom: 0.25rem; }
@@ -23,9 +23,8 @@
 </head>
 <body>
   <h1>Spotify Genre Sorter</h1>
-  <div class="sub">100 % Browser-JavaScript (kein Node, kein Python/pip). Redirect-URI: <code id="redirectHint"></code></div>
+  <div class="sub">Pure JS + MusicBrainz Batch-Scan + Lieblingssongs. Redirect-URI: <code id="redirectHint"></code></div>
 
-  <!-- Login / Setup -->
   <div id="loginBox" class="card" style="display:none;">
     <strong>Mit Spotify verbinden</strong>
     <div class="row">
@@ -37,7 +36,6 @@
     </p>
   </div>
 
-  <!-- Haupt-App -->
   <div id="appBox" style="display:none;">
     <div class="card">
       <div class="row" style="justify-content: space-between; margin-top: 0;">
@@ -62,7 +60,7 @@
       <div class="row">
         <select id="targetMode" onchange="toggleTargetInputs()">
           <option value="new">Neue Playlist erstellen</option>
-          <option value="existing">Bestehende Playlist verwenden</option>
+          <option value="existing">Bestehende Liste / Lieblingssongs</option>
         </select>
         <input id="newPlaylistName" placeholder="Name der neuen Playlist" />
         <select id="targetPlaylist" style="display:none;"></select>
@@ -77,11 +75,14 @@
   </div>
 
   <script>
+    const LIKED_ID = '__LIKED_SONGS__';
     const SCOPES = [
       'playlist-read-private',
       'playlist-read-collaborative',
       'playlist-modify-public',
-      'playlist-modify-private'
+      'playlist-modify-private',
+      'user-library-read',
+      'user-library-modify'
     ].join(' ');
 
     const REDIRECT_URI = window.location.origin + window.location.pathname;
@@ -172,9 +173,7 @@
         alert('Token-Tausch fehlgeschlagen: ' + await resp.text());
         return;
       }
-
-      const data = await resp.json();
-      saveTokens(data);
+      saveTokens(await resp.json());
     }
 
     function saveTokens(data) {
@@ -232,7 +231,7 @@
       return resp;
     }
 
-    // === PLAYLISTS & GENRES ===
+    // === PLAYLISTS LADEN ===
     async function loadPlaylists() {
       const meResp = await spotifyFetch('https://api.spotify.com/v1/me');
       const me = await meResp.json();
@@ -241,6 +240,10 @@
       const tgt = document.getElementById('targetPlaylist');
       src.innerHTML = '';
       tgt.innerHTML = '';
+
+      // Lieblingssongs als erste Option hinzufügen
+      src.add(new Option('❤️ Lieblingssongs (Gespeicherte Songs)', LIKED_ID));
+      tgt.add(new Option('❤️ Lieblingssongs (Gespeicherte Songs)', LIKED_ID));
 
       let url = 'https://api.spotify.com/v1/me/playlists?limit=50';
       while (url) {
@@ -257,6 +260,7 @@
       }
     }
 
+    // === GENRE CACHE & MUSICBRAINZ BATCH-SCAN ===
     function loadGenreCache() {
       try { return JSON.parse(localStorage.getItem('mb_genre_cache') || '{}'); }
       catch { return {}; }
@@ -266,54 +270,79 @@
       localStorage.setItem('mb_genre_cache', JSON.stringify(cache));
     }
 
-    async function fetchMusicBrainzGenres(artistName, cache) {
-      const key = artistName.trim().toLowerCase();
-      if (key in cache) return cache[key];
+    function extractTopTags(tags) {
+      return (tags || [])
+        .filter(t => (t.count || 0) >= 1 && !IGNORED_TAGS.has(t.name.toLowerCase()))
+        .sort((a, b) => (b.count || 0) - (a.count || 0))
+        .slice(0, 4)
+        .map(t => t.name.toLowerCase());
+    }
 
-      // Rate-Limit ~1 Req/Sek beachten
-      await sleep(1100);
-      const q = encodeURIComponent(`artist:"${artistName}"`);
-      try {
-        const resp = await fetch(`https://musicbrainz.org/ws/2/artist/?query=${q}&fmt=json&limit=1`);
-        if (resp.status === 503 || resp.status === 429) {
-          await sleep(2500);
-          return [];
-        }
-        if (!resp.ok) return [];
-        const data = await resp.json();
-        const tags = data.artists?.[0]?.tags || [];
-        const genres = tags
-          .filter(t => (t.count || 0) >= 1 && !IGNORED_TAGS.has(t.name.toLowerCase()))
-          .sort((a, b) => (b.count || 0) - (a.count || 0))
-          .slice(0, 4)
-          .map(t => t.name.toLowerCase());
-        cache[key] = genres;
-        return genres;
-      } catch {
-        return [];
+    async function queryMusicBrainzBatch(artistNames) {
+      const query = artistNames
+        .map(name => `artist:"${name.replace(/["\\]/g, ' ').trim()}"`)
+        .join(' OR ');
+
+      const url = `https://musicbrainz.org/ws/2/artist/?query=${encodeURIComponent(query)}&fmt=json&limit=100`;
+      const resp = await fetch(url);
+      if (resp.status === 503 || resp.status === 429) {
+        await sleep(2500);
+        return { matched: {}, truncated: false };
       }
+      if (!resp.ok) return { matched: {}, truncated: false };
+
+      const data = await resp.json();
+      const wanted = new Set(artistNames.map(n => n.trim().toLowerCase()));
+      const bestByKey = {};
+
+      for (const artistObj of data.artists || []) {
+        const key = (artistObj.name || '').trim().toLowerCase();
+        if (!wanted.has(key)) continue;
+
+        const tags = extractTopTags(artistObj.tags);
+        const tagScore = (artistObj.tags || []).reduce((sum, t) => sum + (t.count || 0), 0);
+
+        if (!bestByKey[key] || tagScore > bestByKey[key].tagScore) {
+          bestByKey[key] = { tags, tagScore };
+        }
+      }
+
+      const matched = {};
+      for (const [key, val] of Object.entries(bestByKey)) {
+        matched[key] = val.tags;
+      }
+      return { matched, truncated: (data.count || 0) > 100 };
     }
 
     async function scanPlaylist() {
       const playlistId = document.getElementById('sourcePlaylist').value;
+      const isLiked = playlistId === LIKED_ID;
       const btn = document.getElementById('scanBtn');
       const status = document.getElementById('scanStatus');
       btn.disabled = true;
 
       try {
-        status.textContent = 'Lade Playlist-Items...';
         const tracks = [];
         const uniqueArtists = new Set();
 
-        let url = `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50`;
+        let url = isLiked
+          ? 'https://api.spotify.com/v1/me/tracks?limit=50'
+          : `https://api.spotify.com/v1/playlists/${playlistId}/items?limit=50`;
+
         while (url) {
+          status.textContent = `Lade Songs (${tracks.length} bisher)...`;
           const resp = await spotifyFetch(url);
-          if (!resp.ok) throw new Error('Kein Zugriff auf diese Playlist (im Dev Mode nur eigene/kollaborative).');
+          if (!resp.ok) {
+            throw new Error(isLiked
+              ? 'Kein Zugriff auf Lieblingssongs. Bitte einmal Logout + neu einloggen (Scope user-library-read).'
+              : 'Kein Zugriff auf diese Playlist (im Dev Mode nur eigene/kollaborative).');
+          }
           const data = await resp.json();
 
           for (const entry of data.items || []) {
             if (entry.is_local) continue;
-            const item = entry.item || entry.track;
+            // /me/tracks nutzt weiterhin "track", Playlists nutzen seit 2026 "item"
+            const item = isLiked ? entry.track : (entry.item || entry.track);
             if (!item || item.type !== 'track' || !item.uri) continue;
 
             const artists = (item.artists || []).map(a => a.name).filter(Boolean);
@@ -325,25 +354,40 @@
           url = data.next;
         }
 
+        // Nur uncached Artists in 8er-Batches bei MusicBrainz abfragen
         const cache = loadGenreCache();
-        const artistList = Array.from(uniqueArtists);
-        const artistGenres = {};
+        const uncached = Array.from(uniqueArtists).filter(name => !(name.trim().toLowerCase() in cache));
 
-        for (let i = 0; i < artistList.length; i++) {
-          const name = artistList[i];
-          const cached = name.trim().toLowerCase() in cache;
-          if (!cached) {
-            status.textContent = `Scanne Genres (${i + 1}/${artistList.length} Artists): ${name}...`;
+        const BATCH_SIZE = 8;
+        for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
+          const batch = uncached.slice(i, i + BATCH_SIZE);
+          status.textContent = `Scanne Genres (${Math.min(i + BATCH_SIZE, uncached.length)}/${uncached.length} neue Artists)...`;
+
+          await sleep(1050);
+          const { matched, truncated } = await queryMusicBrainzBatch(batch);
+
+          for (const name of batch) {
+            const key = name.trim().toLowerCase();
+            if (key in matched) {
+              cache[key] = matched[key];
+            } else if (truncated && batch.length > 1) {
+              // Nur falls >100 Treffer die Antwort abgeschnitten haben, einzeln nachprüfen
+              await sleep(1050);
+              const single = await queryMusicBrainzBatch([name]);
+              cache[key] = single.matched[key] || [];
+            } else {
+              cache[key] = [];
+            }
           }
-          artistGenres[name] = await fetchMusicBrainzGenres(name, cache);
-          if (!cached && i % 10 === 0) saveGenreCache(cache);
+          if ((i / BATCH_SIZE) % 5 === 0) saveGenreCache(cache);
         }
         saveGenreCache(cache);
 
+        // Genres den Songs zuordnen
         const genreCounts = {};
         for (const t of tracks) {
           for (const a of t.artists) {
-            (artistGenres[a] || []).forEach(g => t.genres.add(g));
+            (cache[a.trim().toLowerCase()] || []).forEach(g => t.genres.add(g));
           }
           t.genreList = t.genres.size ? Array.from(t.genres) : ['unbekannt'];
           for (const g of t.genreList) {
@@ -357,7 +401,7 @@
           .map(([genre, count]) => ({ genre, count }))
           .sort((a, b) => b.count - a.count);
 
-        status.textContent = `Fertig: ${tracks.length} Songs, ${sortedGenres.length} Genres gefunden (im Browser gecacht).`;
+        status.textContent = `Fertig: ${tracks.length} Songs, ${sortedGenres.length} Genres gefunden (${uncached.length} neue Artists abgefragt).`;
         renderGenres(sortedGenres);
       } catch (err) {
         status.textContent = err.message;
@@ -416,6 +460,10 @@
       btn.disabled = true;
       try {
         let targetId = isNew ? null : document.getElementById('targetPlaylist').value;
+        if (!isNew && targetId === sourceId) {
+          throw new Error('Quelle und Ziel dürfen nicht identisch sein.');
+        }
+
         if (isNew) {
           const name = document.getElementById('newPlaylistName').value.trim();
           if (!name) throw new Error('Bitte einen Namen für die neue Playlist eingeben.');
@@ -431,26 +479,49 @@
 
         const uris = matches.map(t => t.uri);
         status.textContent = `Füge ${uris.length} Songs hinzu...`;
-        for (let i = 0; i < uris.length; i += 100) {
-          const chunk = uris.slice(i, i + 100);
-          const addResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${targetId}/items`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uris: chunk })
-          });
-          if (!addResp.ok) throw new Error('Fehler beim Hinzufügen der Songs.');
+
+        if (targetId === LIKED_ID) {
+          // 2026 Library-Endpunkt: max. 40 URIs pro Aufruf
+          for (let i = 0; i < uris.length; i += 40) {
+            const chunk = uris.slice(i, i + 40);
+            const resp = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, {
+              method: 'PUT'
+            });
+            if (!resp.ok) throw new Error('Fehler beim Speichern in Lieblingssongs.');
+          }
+        } else {
+          for (let i = 0; i < uris.length; i += 100) {
+            const chunk = uris.slice(i, i + 100);
+            const addResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${targetId}/items`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ uris: chunk })
+            });
+            if (!addResp.ok) throw new Error('Fehler beim Hinzufügen der Songs.');
+          }
         }
 
         if (actionMode === 'move') {
-          status.textContent = 'Entferne Songs aus der Quell-Playlist...';
-          for (let i = 0; i < uris.length; i += 100) {
-            const chunk = uris.slice(i, i + 100);
-            const delResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${sourceId}/items`, {
-              method: 'DELETE',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ items: chunk.map(uri => ({ uri })) })
-            });
-            if (!delResp.ok) throw new Error('Songs kopiert, aber Entfernen aus Quelle fehlgeschlagen.');
+          status.textContent = 'Entferne Songs aus der Quelle...';
+          if (sourceId === LIKED_ID) {
+            // 2026 Library-Endpunkt: max. 40 URIs pro Aufruf
+            for (let i = 0; i < uris.length; i += 40) {
+              const chunk = uris.slice(i, i + 40);
+              const delResp = await spotifyFetch(`https://api.spotify.com/v1/me/library?uris=${encodeURIComponent(chunk.join(','))}`, {
+                method: 'DELETE'
+              });
+              if (!delResp.ok) throw new Error('Songs kopiert, aber Entfernen aus Lieblingssongs fehlgeschlagen.');
+            }
+          } else {
+            for (let i = 0; i < uris.length; i += 100) {
+              const chunk = uris.slice(i, i + 100);
+              const delResp = await spotifyFetch(`https://api.spotify.com/v1/playlists/${sourceId}/items`, {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ items: chunk.map(uri => ({ uri })) })
+              });
+              if (!delResp.ok) throw new Error('Songs kopiert, aber Entfernen aus Quelle fehlgeschlagen.');
+            }
           }
         }
 
